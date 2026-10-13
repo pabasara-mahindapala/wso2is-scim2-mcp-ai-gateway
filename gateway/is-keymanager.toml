@@ -1,0 +1,16 @@
+# ---- For using WSO2 Identity Server 7.3 as the token issuer for mcp-auth ----
+# issuer must equal the "iss" claim of IS access tokens exactly.
+# JWKS is fetched from inside the gateway container, hence host.docker.internal.
+# Append the following configations to the end of the IS deployment.toml.
+
+[[policy_configurations.jwtauth_v1.keymanagers]]
+name = "WSO2IS"
+issuer = "https://localhost:9443/oauth2/token"
+
+[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
+uri = "https://host.docker.internal:9443/oauth2/jwks"
+skipTlsVerify = true   # IS default self-signed cert; local demo only
+
+# Base URL written into the protected-resource metadata (mcp-auth v1.4.0: gatewayUrl; gatewayHost is deprecated)
+[policy_configurations.mcpauth_v1]
+gatewayurl = "https://localhost:8443"

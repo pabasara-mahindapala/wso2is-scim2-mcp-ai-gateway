@@ -1,0 +1,749 @@
+arazzo: 1.0.1
+info:
+  title: IS SCIM2 MCP
+  summary: Manage users, groups, roles and AI agents in WSO2 Identity Server 7.3 through SCIM 2.0.
+  description: >
+    Task-shaped workflows over the WSO2 Identity Server 7.3 SCIM 2.0 APIs (Users, Groups, Roles v2,
+    Bulk, Agents). Each workflow becomes one MCP tool via arazzo-mcp-gen. The workflow `summary`
+    is the tool description the LLM sees, so it carries the usage guidance.
+  version: 1.0.0
+sourceDescriptions:
+  - name: scimUsers
+    url: ./scim2-users.yaml
+    type: openapi
+  - name: scimGroups
+    url: ./scim2-groups.yaml
+    type: openapi
+  - name: scimRoles
+    url: ./roles-v2.yaml
+    type: openapi
+  - name: scimBulk
+    url: ./scim2-bulk.yaml
+    type: openapi
+  - name: scimAgents
+    url: ./scim2-agents.yaml
+    type: openapi
+
+workflows:
+  # ───────────────────────────── Users ─────────────────────────────
+  - workflowId: listUsers
+    summary: >
+      List users in WSO2 Identity Server with id, userName, name, emails and profile (region, department, employeeNumber, costCenter, customerTier, contractEndDate). Use count to limit results (10 is typical).
+      Use search_users instead when you know part of a username or email.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        count: { type: integer, description: Maximum number of users to return }
+    steps:
+      - stepId: list
+        description: GET /Users with a compact attribute set.
+        operationId: getUser
+        parameters:
+          - { name: attributes, in: query, value: "userName,name,emails,addresses,urn:ietf:params:scim:schemas:extension:enterprise:2.0:User,urn:scim:schemas:extension:custom:User" }
+          - { name: startIndex, in: query, value: 1 }
+          - { name: count, in: query, value: $inputs.count }
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          totalResults: $response.body#/totalResults
+          users: $response.body#/Resources
+    outputs:
+      error: $steps.list.outputs.error
+      errorStatus: $steps.list.outputs.errorStatus
+      totalResults: $steps.list.outputs.totalResults
+      users: $steps.list.outputs.users
+
+  - workflowId: searchUsers
+    summary: >
+      Search users with a SCIM filter, e.g. 'userName eq emma.clarke', 'userName sw em', 'emails co example.com',
+      'name.familyName eq Clarke'. Profile filters: region 'addresses.work eq EU', department
+      'urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department eq Finance', customer tier 'urn:scim:schemas:extension:custom:User:customerTier eq gold'.
+      Operators: eq, co, sw, ew, and. Returns id, userName, name, emails and profile attributes.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        filter: { type: string, description: SCIM filter expression }
+        count: { type: integer, description: Maximum number of users to return }
+    steps:
+      - stepId: search
+        description: POST /Users/.search
+        operationId: getUsersByPost
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:SearchRequest"]
+            attributes: ["userName", "name", "emails", "addresses", "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User", "urn:scim:schemas:extension:custom:User"]
+            filter: $inputs.filter
+            startIndex: 1
+            count: $inputs.count
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          totalResults: $response.body#/totalResults
+          users: $response.body#/Resources
+    outputs:
+      error: $steps.search.outputs.error
+      errorStatus: $steps.search.outputs.errorStatus
+      totalResults: $steps.search.outputs.totalResults
+      users: $steps.search.outputs.users
+
+  - workflowId: getUser
+    summary: >
+      Get one user's full profile by user id, including the groups and roles they belong to.
+      If the result contains a SCIM error with a 4xx status, the call failed.
+    inputs:
+      type: object
+      properties:
+        userId: { type: string, description: The user's SCIM id }
+    steps:
+      - stepId: get
+        description: GET /Users/{id}
+        operationId: getUserById
+        parameters:
+          - { name: id, in: path, value: $inputs.userId }
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          user: $response.body
+    outputs:
+      user: $steps.get.outputs.user
+
+  - workflowId: createUser
+    summary: >
+      Create a user. The password must satisfy the Identity Server password policy (by default at least 8 characters,
+      including an upper-case letter and a digit). Returns the new user's id and userName.
+      If error is set (not None), the call failed and error says why (e.g. 409 user exists).
+    inputs:
+      type: object
+      properties:
+        userName: { type: string }
+        password: { type: string }
+        givenName: { type: string }
+        familyName: { type: string }
+        email: { type: string }
+    steps:
+      - stepId: create
+        description: POST /Users
+        operationId: createUser
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"]
+            userName: $inputs.userName
+            password: $inputs.password
+            name:
+              givenName: $inputs.givenName
+              familyName: $inputs.familyName
+            emails:
+              - value: $inputs.email
+                primary: true
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          id: $response.body#/id
+          userName: $response.body#/userName
+    outputs:
+      error: $steps.create.outputs.error
+      errorStatus: $steps.create.outputs.errorStatus
+      id: $steps.create.outputs.id
+      userName: $steps.create.outputs.userName
+
+  - workflowId: updateUserAttribute
+    summary: >
+      Change one single-valued attribute of a user, e.g. attribute 'name.givenName', 'name.familyName',
+      'nickName', 'title' or 'displayName'. Not for emails, groups or roles.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        userId: { type: string }
+        attribute: { type: string, description: SCIM attribute path }
+        value: { type: string }
+    steps:
+      - stepId: patch
+        description: PATCH /Users/{id} with one replace operation.
+        operationId: patchUser
+        parameters:
+          - { name: id, in: path, value: $inputs.userId }
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+            Operations:
+              - op: replace
+                path: $inputs.attribute
+                value: $inputs.value
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          id: $response.body#/id
+          userName: $response.body#/userName
+    outputs:
+      error: $steps.patch.outputs.error
+      errorStatus: $steps.patch.outputs.errorStatus
+      id: $steps.patch.outputs.id
+      userName: $steps.patch.outputs.userName
+
+  - workflowId: updateUserProfile
+    summary: >
+      Set a user's profile attributes in one call: region (e.g. EU, APAC, NA), department, employeeNumber,
+      costCenter, customerTier (e.g. gold, silver, bronze) and contractEndDate (YYYY-MM-DD).
+      All values are required and replace the current ones, so call get_user first and pass existing values
+      for anything that should not change. Region is stored as the user's work address.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        userId: { type: string }
+        region: { type: string }
+        department: { type: string }
+        employeeNumber: { type: string }
+        costCenter: { type: string }
+        customerTier: { type: string }
+        contractEndDate: { type: string }
+    steps:
+      - stepId: patch
+        description: >
+          PATCH /Users/{id}. Region maps to the built-in claim http://wso2.org/claims/region, exposed in SCIM as
+          addresses.work; IS only stores it from the 'formatted' sub-attribute (type/value or type/region return 200
+          but store nothing). Enterprise and custom schema attributes go in their extension objects.
+        operationId: patchUser
+        parameters:
+          - { name: id, in: path, value: $inputs.userId }
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+            Operations:
+              - op: replace
+                value:
+                  addresses:
+                    - type: work
+                      formatted: $inputs.region
+                  "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User":
+                    department: $inputs.department
+                    employeeNumber: $inputs.employeeNumber
+                    costCenter: $inputs.costCenter
+                  "urn:scim:schemas:extension:custom:User":
+                    customerTier: $inputs.customerTier
+                    contractEndDate: $inputs.contractEndDate
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          id: $response.body#/id
+          userName: $response.body#/userName
+          addresses: $response.body#/addresses
+          enterprise: $response.body#/urn:ietf:params:scim:schemas:extension:enterprise:2.0:User
+          custom: $response.body#/urn:scim:schemas:extension:custom:User
+    outputs:
+      error: $steps.patch.outputs.error
+      errorStatus: $steps.patch.outputs.errorStatus
+      id: $steps.patch.outputs.id
+      userName: $steps.patch.outputs.userName
+      addresses: $steps.patch.outputs.addresses
+      enterprise: $steps.patch.outputs.enterprise
+      custom: $steps.patch.outputs.custom
+
+  - workflowId: deleteUser
+    summary: >
+      Permanently delete a user by user id. This cannot be undone.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        userId: { type: string }
+    steps:
+      - stepId: delete
+        description: DELETE /Users/{id}
+        operationId: deleteUser
+        parameters:
+          - { name: id, in: path, value: $inputs.userId }
+        successCriteria:
+          - condition: $statusCode == 204
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          status: $statusCode
+    outputs:
+      error: $steps.delete.outputs.error
+      errorStatus: $steps.delete.outputs.errorStatus
+      status: $steps.delete.outputs.status
+
+  # ───────────────────────────── Groups ─────────────────────────────
+  - workflowId: listGroups
+    summary: >
+      List groups with their ids, names and members. Use count to limit results (10 is typical).
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        count: { type: integer }
+    steps:
+      - stepId: list
+        description: GET /Groups
+        operationId: getGroup
+        parameters:
+          - { name: attributes, in: query, value: "displayName,members" }
+          - { name: startIndex, in: query, value: 1 }
+          - { name: count, in: query, value: $inputs.count }
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          totalResults: $response.body#/totalResults
+          groups: $response.body#/Resources
+    outputs:
+      error: $steps.list.outputs.error
+      errorStatus: $steps.list.outputs.errorStatus
+      totalResults: $steps.list.outputs.totalResults
+      groups: $steps.list.outputs.groups
+
+  - workflowId: createGroup
+    summary: >
+      Create an empty group. Group names cannot contain spaces (3-30 characters, e.g. Support-Team or Support_Team). Returns the new group's id. Add members with add_user_to_group.
+      If error is set (not None), the call failed and error says why (e.g. 409 group exists).
+    inputs:
+      type: object
+      properties:
+        displayName: { type: string }
+    steps:
+      - stepId: create
+        description: POST /Groups
+        operationId: createGroup
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+            displayName: $inputs.displayName
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          id: $response.body#/id
+          displayName: $response.body#/displayName
+    outputs:
+      error: $steps.create.outputs.error
+      errorStatus: $steps.create.outputs.errorStatus
+      id: $steps.create.outputs.id
+      displayName: $steps.create.outputs.displayName
+
+  - workflowId: addUserToGroup
+    summary: >
+      Add a user to a group, using the user id and group id.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        groupId: { type: string }
+        userId: { type: string }
+    steps:
+      # IS requires the member's display name (userName) as well as its id, so look it up first.
+      - stepId: lookupUser
+        description: GET /Users/{id} to get the userName IS needs for the member display value.
+        operationId: getUserById
+        parameters:
+          - { name: id, in: path, value: $inputs.userId }
+          - { name: attributes, in: query, value: userName }
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          userName: $response.body#/userName
+      - stepId: addMember
+        description: PATCH /Groups/{id} adding the member with value + display.
+        operationId: patchGroup
+        parameters:
+          - { name: id, in: path, value: $inputs.groupId }
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+            Operations:
+              - op: add
+                value:
+                  members:
+                    - value: $inputs.userId
+                      display: $steps.lookupUser.outputs.userName
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          group: $response.body#/displayName
+    outputs:
+      error: $steps.addMember.outputs.error
+      errorStatus: $steps.addMember.outputs.errorStatus
+      lookupError: $steps.lookupUser.outputs.error
+      group: $steps.addMember.outputs.group
+      addedUser: $steps.lookupUser.outputs.userName
+
+  - workflowId: removeUserFromGroup
+    summary: >
+      Remove a user from a group, using the user id and group id.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        groupId: { type: string }
+        userId: { type: string }
+    steps:
+      - stepId: removeMember
+        description: PATCH /Groups/{id} with a filtered remove.
+        operationId: patchGroup
+        parameters:
+          - { name: id, in: path, value: $inputs.groupId }
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+            Operations:
+              - op: remove
+                path: 'members[value eq "{$inputs.userId}"]'
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          group: $response.body#/displayName
+    outputs:
+      error: $steps.removeMember.outputs.error
+      errorStatus: $steps.removeMember.outputs.errorStatus
+      group: $steps.removeMember.outputs.group
+
+  - workflowId: deleteGroup
+    summary: >
+      Permanently delete a group by group id. Its members are not deleted.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        groupId: { type: string }
+    steps:
+      - stepId: delete
+        description: DELETE /Groups/{id}
+        operationId: deleteGroup
+        parameters:
+          - { name: id, in: path, value: $inputs.groupId }
+        successCriteria:
+          - condition: $statusCode == 204
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          status: $statusCode
+    outputs:
+      error: $steps.delete.outputs.error
+      errorStatus: $steps.delete.outputs.errorStatus
+      status: $steps.delete.outputs.status
+
+  # ───────────────────────────── Roles (v2) ─────────────────────────────
+  - workflowId: listRoles
+    summary: >
+      List roles with their ids, names, audience and assigned users and groups. Use count to limit results (10 is typical).
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        count: { type: integer }
+    steps:
+      - stepId: list
+        description: GET /v2/Roles
+        operationId: getRoleV2
+        parameters:
+          - { name: startIndex, in: query, value: 1 }
+          - { name: count, in: query, value: $inputs.count }
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          totalResults: $response.body#/totalResults
+          roles: $response.body#/Resources
+    outputs:
+      error: $steps.list.outputs.error
+      errorStatus: $steps.list.outputs.errorStatus
+      totalResults: $steps.list.outputs.totalResults
+      roles: $steps.list.outputs.roles
+
+  - workflowId: createRole
+    summary: >
+      Create an organization-level role with no permissions. Returns the new role's id.
+      Assign it to users with assign_role_to_user.
+      If error is set (not None), the call failed and error says why (e.g. 409 role exists).
+    inputs:
+      type: object
+      properties:
+        displayName: { type: string }
+    steps:
+      - stepId: create
+        description: POST /v2/Roles (no audience given, so IS uses the organization audience).
+        operationId: createRoleV2
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:schemas:extension:2.0:Role"]
+            displayName: $inputs.displayName
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          id: $response.body#/id
+          displayName: $response.body#/displayName
+    outputs:
+      error: $steps.create.outputs.error
+      errorStatus: $steps.create.outputs.errorStatus
+      id: $steps.create.outputs.id
+      displayName: $steps.create.outputs.displayName
+
+  - workflowId: assignRoleToUser
+    summary: >
+      Assign a role to a user, using the role id and user id.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        roleId: { type: string }
+        userId: { type: string }
+    steps:
+      - stepId: addUser
+        description: PATCH /v2/Roles/{id} adding the user.
+        operationId: patchRole
+        parameters:
+          - { name: id, in: path, value: $inputs.roleId }
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+            Operations:
+              - op: add
+                path: users
+                value:
+                  - value: $inputs.userId
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          role: $response.body#/displayName
+    outputs:
+      error: $steps.addUser.outputs.error
+      errorStatus: $steps.addUser.outputs.errorStatus
+      role: $steps.addUser.outputs.role
+
+  - workflowId: removeRoleFromUser
+    summary: >
+      Remove a role from a user, using the role id and user id.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        roleId: { type: string }
+        userId: { type: string }
+    steps:
+      - stepId: removeUser
+        description: PATCH /v2/Roles/{id} with a filtered remove.
+        operationId: patchRole
+        parameters:
+          - { name: id, in: path, value: $inputs.roleId }
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]
+            Operations:
+              - op: remove
+                path: 'users[value eq "{$inputs.userId}"]'
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          role: $response.body#/displayName
+    outputs:
+      error: $steps.removeUser.outputs.error
+      errorStatus: $steps.removeUser.outputs.errorStatus
+      role: $steps.removeUser.outputs.role
+
+  - workflowId: deleteRole
+    summary: >
+      Permanently delete a role by role id. Users who had the role lose it.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        roleId: { type: string }
+    steps:
+      - stepId: delete
+        description: DELETE /v2/Roles/{id}
+        operationId: deleteRoleV2
+        parameters:
+          - { name: id, in: path, value: $inputs.roleId }
+        successCriteria:
+          - condition: $statusCode == 204
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          status: $statusCode
+    outputs:
+      error: $steps.delete.outputs.error
+      errorStatus: $steps.delete.outputs.errorStatus
+      status: $steps.delete.outputs.status
+
+  # ───────────────────────────── Agents ─────────────────────────────
+  - workflowId: listAgents
+    summary: >
+      List AI agent identities registered in Identity Server. Use count to limit results (10 is typical).
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        count: { type: integer }
+    steps:
+      - stepId: list
+        description: GET /Agents
+        operationId: getAgents
+        parameters:
+          - { name: startIndex, in: query, value: 1 }
+          - { name: count, in: query, value: $inputs.count }
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          totalResults: $response.body#/totalResults
+          agents: $response.body#/Resources
+    outputs:
+      error: $steps.list.outputs.error
+      errorStatus: $steps.list.outputs.errorStatus
+      totalResults: $steps.list.outputs.totalResults
+      agents: $steps.list.outputs.agents
+
+  - workflowId: createAgent
+    summary: >
+      Register a new AI agent identity with a display name and description. Returns the agent's id and userName.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        displayName: { type: string }
+        description: { type: string }
+    steps:
+      - stepId: create
+        description: POST /Agents. Only id and userName are output; the response also carries the agent's initial password, which must not reach the LLM.
+        operationId: createAgent
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:schemas:core:2.0:User", "urn:scim:wso2:agent:schema"]
+            "urn:scim:wso2:agent:schema":
+              DisplayName: $inputs.displayName
+              Description: $inputs.description
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          id: $response.body#/id
+          userName: $response.body#/userName
+    outputs:
+      error: $steps.create.outputs.error
+      errorStatus: $steps.create.outputs.errorStatus
+      id: $steps.create.outputs.id
+      userName: $steps.create.outputs.userName
+
+  - workflowId: deleteAgent
+    summary: >
+      Permanently delete an AI agent identity by agent id.
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        agentId: { type: string }
+    steps:
+      - stepId: delete
+        description: DELETE /Agents/{agentId}
+        operationId: deleteAgentById
+        parameters:
+          - { name: agentId, in: path, value: $inputs.agentId }
+        successCriteria:
+          - condition: $statusCode == 204
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          status: $statusCode
+    outputs:
+      error: $steps.delete.outputs.error
+      errorStatus: $steps.delete.outputs.errorStatus
+      status: $steps.delete.outputs.status
+
+  # ───────────────────────────── Bulk ─────────────────────────────
+  - workflowId: bulkCreateUsers
+    summary: >
+      Create two users in one SCIM Bulk request. Passwords must satisfy the password policy (by default at least 8 characters, including an upper-case letter and a digit).
+      Returns the per-user result (location and status code; 201 means created).
+      If error is set (not None), the call failed and error says why.
+    inputs:
+      type: object
+      properties:
+        user1UserName: { type: string }
+        user1Password: { type: string }
+        user1GivenName: { type: string }
+        user1FamilyName: { type: string }
+        user2UserName: { type: string }
+        user2Password: { type: string }
+        user2GivenName: { type: string }
+        user2FamilyName: { type: string }
+    steps:
+      - stepId: bulk
+        description: POST /Bulk with two POST /Users operations.
+        operationId: createBulkUsers
+        requestBody:
+          contentType: application/scim+json
+          payload:
+            schemas: ["urn:ietf:params:scim:api:messages:2.0:BulkRequest"]
+            failOnErrors: 1
+            Operations:
+              - method: POST
+                path: /Users
+                bulkId: user1
+                data:
+                  schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"]
+                  userName: $inputs.user1UserName
+                  password: $inputs.user1Password
+                  name:
+                    givenName: $inputs.user1GivenName
+                    familyName: $inputs.user1FamilyName
+              - method: POST
+                path: /Users
+                bulkId: user2
+                data:
+                  schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"]
+                  userName: $inputs.user2UserName
+                  password: $inputs.user2Password
+                  name:
+                    givenName: $inputs.user2GivenName
+                    familyName: $inputs.user2FamilyName
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          error: $response.body#/detail
+          errorStatus: $response.body#/status
+          results: $response.body#/Operations
+    outputs:
+      error: $steps.bulk.outputs.error
+      errorStatus: $steps.bulk.outputs.errorStatus
+      results: $steps.bulk.outputs.results
